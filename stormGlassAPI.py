@@ -1,79 +1,6 @@
-# import arrow
-# import requests
-# import json
-# from pprint import pprint
-
-# import arrow
-# import requests
-# import json
-# from pprint import pprint
-
-# # Define all desired parameters based on StormGlass API
-# # Define all desired parameters as separate strings in a list
-# desired_params = [
-#     'waterTemperature',
-#     'wavePeriod',
-#     'waveDirection',
-#     'waveHeight',
-#     'windSpeed',
-#     'windDirection', # N NE E SE...
-#     'airTemperature',
-#     'precipitation',
-#     'cloudCover',
-#     'humidity',
-#     'pressure',
-#     'visibility',
-#     'currentSpeed',
-#     'currentDirection',
-#     'seaLevel',
-#     # 'uvIndex',
-# ]
-
-# # Construct the parameters string
-# params_string = ','.join(sorted(set(desired_params)))
-
-# # Get the first hour of today in UTC
-# start = arrow.now().floor('day').to('UTC').timestamp()
-
-# # Get the last hour of today in UTC
-# end = arrow.now().ceil('day').to('UTC').timestamp()
-
-
-# response = requests.get(
-#   'https://api.stormglass.io/v2/weather/point',
-#   params={
-#     'lat': -33.9249,
-#     'lng': 18.4241,
-#     'params': params_string,
-#     'start': start,  # Convert to UTC timestamp
-#     'end': end  # Convert to UTC timestamp
-#   },
-#   headers={
-#     'Authorization': 
-#   }
-# )
-# '''
-# response = requests.get(
-#   'https://api.stormglass.io/v2/tide/stations',
-#   headers={
-#     'Authorization': 
-#   }
-# )
-# '''
-
-# # Do something with response data.
-# json_data = response.json()
-
-# pprint(json_data)
-
-
-
 import arrow
 import requests
-import json
-from pprint import pprint
 import csv
-import time
 import os
 
 def read_api_key(file_path='apiKey.txt'):
@@ -98,21 +25,18 @@ def read_api_key(file_path='apiKey.txt'):
         print(f"An error occurred while reading '{file_path}': {e}")
         raise
 
-def fetch_weather_data_for_day(lat, lng, params, date, api_key):
+def fetch_weather_data(lat, lng, params, start_timestamp, end_timestamp, api_key):
     """
-    Fetches weather data for a specific day at 8 AM UTC.
+    Fetches weather data for a specified time range.
 
     :param lat: Latitude of the location.
     :param lng: Longitude of the location.
     :param params: Comma-separated string of weather parameters.
-    :param date: Arrow object representing the date.
+    :param start_timestamp: Start of the time range (UTC timestamp).
+    :param end_timestamp: End of the time range (UTC timestamp).
     :param api_key: StormGlass API key.
-    :return: JSON data for the specified day at 8 AM or None if not found.
+    :return: JSON data for the specified time range or None if an error occurs.
     """
-    # Define the time range for 8 AM UTC
-    start = date.replace(hour=8, minute=0, second=0).to('UTC').timestamp()
-    end = date.replace(hour=9, minute=0, second=0).to('UTC').timestamp()  # 1-hour window
-
     try:
         response = requests.get(
             'https://api.stormglass.io/v2/weather/point',
@@ -120,27 +44,23 @@ def fetch_weather_data_for_day(lat, lng, params, date, api_key):
                 'lat': lat,
                 'lng': lng,
                 'params': params,
-                'start': start,
-                'end': end
+                'start': start_timestamp,
+                'end': end_timestamp
             },
             headers={
                 'Authorization': api_key
             },
-            timeout=10  # Timeout after 10 seconds
+            timeout=120  # Increased timeout for large data
         )
 
         if response.status_code == 200:
             data = response.json()
-            hours = data.get('hours', [])
-            if not hours:
-                print(f"No data available for {date.format('YYYY-MM-DD')} at 8 AM UTC.")
-                return None
-            return hours[0]  # Assuming the first entry is 8 AM
+            return data
         elif response.status_code == 429:
             # Rate limit exceeded; wait and retry
             print("Rate limit exceeded. Sleeping for 60 seconds.")
             time.sleep(60)
-            return fetch_weather_data_for_day(lat, lng, params, date, api_key)
+            return fetch_weather_data(lat, lng, params, start_timestamp, end_timestamp, api_key)
         else:
             print(f"Error {response.status_code}: {response.text}")
             return None
@@ -149,57 +69,74 @@ def fetch_weather_data_for_day(lat, lng, params, date, api_key):
         print(f"Request failed: {e}")
         return None
 
-def collect_historical_weather_data(lat, lng, params, start_date, end_date, api_key, output_file='historical_weather_8am.csv'):
+def extract_8am_data(data):
     """
-    Collects historical weather data for every day at 8 AM and saves it to a CSV file.
+    Extracts data points corresponding to 8 AM UTC.
 
-    :param lat: Latitude of the location.
-    :param lng: Longitude of the location.
-    :param params: Comma-separated string of weather parameters.
-    :param start_date: Arrow object representing the start date.
-    :param end_date: Arrow object representing the end date.
-    :param api_key: StormGlass API key.
+    :param data: JSON data from the API.
+    :return: List of dictionaries containing 8 AM data.
+    """
+    eight_am_data = []
+    hours = data.get('hours', [])
+    for hour_entry in hours:
+        time_str = hour_entry.get('time')
+        if not time_str:
+            continue
+        time_obj = arrow.get(time_str)
+        if time_obj.hour == 8:
+            eight_am_data.append(hour_entry)
+    return eight_am_data
+
+def extract_sg_values(data_list, params):
+    """
+    Extracts 'sg' values from each parameter's dictionary.
+
+    :param data_list: List of dictionaries containing hourly data.
+    :param params: List of weather parameters.
+    :return: List of dictionaries with 'sg' values only.
+    """
+    processed_data = []
+    for entry in data_list:
+        processed_entry = {'date': entry.get('time')}
+        for param in params:
+            param_data = entry.get(param, {})
+            if isinstance(param_data, dict):
+                # Extract the 'sg' value if available
+                processed_entry[param] = param_data.get('sg')
+            else:
+                # If the parameter is not a dict, assign it directly
+                processed_entry[param] = param_data
+        processed_data.append(processed_entry)
+    return processed_data
+
+def save_to_csv(data, params, output_file='historical_weather_8am.csv'):
+    """
+    Saves the processed 8 AM data to a CSV file.
+
+    :param data: List of dictionaries containing processed 8 AM data.
+    :param params: List of weather parameters.
     :param output_file: Filename for the output CSV.
     """
-    current_date = start_date
+    if not data:
+        print("No 8 AM data to save.")
+        return
 
-    # Open the CSV file for writing
-    with open(output_file, mode='w', newline='', encoding='utf-8') as csv_file:
-        # Define the header based on the parameters
-        fieldnames = ['date'] + sorted(set(params.split(',')))
-        writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+    # Define CSV headers
+    headers = ['date'] + params
+
+    with open(output_file, mode='w', newline='', encoding='utf-8') as csvfile:
+        writer = csv.DictWriter(csvfile, fieldnames=headers)
         writer.writeheader()
 
-        total_days = (end_date - start_date).days + 1
-        fetched_days = 0
+        for entry in data:
+            writer.writerow(entry)
 
-        while current_date <= end_date:
-            print(f"Fetching data for {current_date.format('YYYY-MM-DD')} at 8 AM UTC...")
-            day_data = fetch_weather_data_for_day(lat, lng, params, current_date, api_key)
-
-            if day_data:
-                # Prepare the row for CSV
-                row = {'date': day_data.get('time')}
-                for param in fieldnames[1:]:
-                    row[param] = day_data.get(param, None)
-                writer.writerow(row)
-                print(f"Data for {current_date.format('YYYY-MM-DD')} written to CSV.")
-                fetched_days += 1
-            else:
-                print(f"No data for {current_date.format('YYYY-MM-DD')}.")
-
-            # Move to the next day
-            current_date = current_date.shift(days=1)
-
-            # Optional: Sleep to respect rate limits
-            time.sleep(1)  # Adjust based on your API plan's rate limits
-
-    print(f"Data collection complete. {fetched_days}/{total_days} days fetched. Saved to '{output_file}'.")
+    print(f"Data successfully saved to '{output_file}'.")
 
 def main():
     # Read the API key from apiKey.txt
     try:
-        API_KEY = read_api_key('apiKey.txt')
+        API_KEY = read_api_key('apiKey2.txt')
     except Exception as e:
         print(f"Failed to read API key: {e}")
         return
@@ -208,31 +145,23 @@ def main():
     latitude = -33.9249
     longitude = 18.4241
 
-    # Define the date range (e.g., last 3 years)
-    years_of_data = 3
-    end_date = arrow.utcnow().floor('day')  # Today's date in UTC
-    start_date = end_date.shift(years=-years_of_data)  # 3 years ago
-
-    print(f"Fetching data from {start_date.format('YYYY-MM-DD')} to {end_date.format('YYYY-MM-DD')}")
-
-    # Define desired parameters
+    # Define the desired parameters
     desired_params = [
+        'airTemperature',
+        'cloudCover',
+        'currentDirection',
+        'currentSpeed',
+        'humidity',
+        'precipitation',
+        'pressure',
+        'seaLevel',
+        'visibility',
         'waterTemperature',
-        'wavePeriod',
         'waveDirection',
         'waveHeight',
-        'windSpeed',
-        'windDirection',  # N, NE, E, SE, etc.
-        'airTemperature',
-        'precipitation',
-        'cloudCover',
-        'humidity',
-        'pressure',
-        'visibility',
-        'currentSpeed',
-        'currentDirection',
-        'seaLevel',
-        # 'uvIndex',  # Uncomment if available and needed
+        'wavePeriod',
+        'windDirection',
+        'windSpeed'
     ]
 
     # Ensure parameters are unique and sorted
@@ -241,16 +170,35 @@ def main():
     # Convert the list of parameters into a comma-separated string
     params_string = ','.join(unique_params)
 
-    # Collect the historical weather data
-    collect_historical_weather_data(
-        lat=latitude,
-        lng=longitude,
-        params=params_string,
-        start_date=start_date,
-        end_date=end_date,
-        api_key=API_KEY,
-        output_file='historical_weather_8am.csv'
-    )
+    # Define the date range (e.g., last 3 years)
+    years_of_data = 3
+    end_date = arrow.utcnow().floor('day')  # Today's date in UTC
+    start_date = end_date.shift(years=-years_of_data)  # 3 years ago
+
+    print(f"Fetching data from {start_date.format('YYYY-MM-DD')} to {end_date.format('YYYY-MM-DD')}")
+
+    # Convert start and end dates to UTC timestamps
+    start_timestamp = start_date.replace(hour=0, minute=0, second=0).to('UTC').timestamp()
+    end_timestamp = end_date.replace(hour=23, minute=59, second=59).to('UTC').timestamp()
+
+    # Fetch the data
+    print("Making API request...")
+    data = fetch_weather_data(latitude, longitude, params_string, start_timestamp, end_timestamp, API_KEY)
+
+    if data:
+        print("Extracting 8 AM data points...")
+        # Extract 8 AM data points
+        eight_am_data = extract_8am_data(data)
+
+        print("Processing data to extract 'sg' values...")
+        # Extract 'sg' values
+        processed_data = extract_sg_values(eight_am_data, unique_params)
+
+        print("Saving data to CSV...")
+        # Save to CSV
+        save_to_csv(processed_data, unique_params, output_file='historical_weather_8am.csv')
+    else:
+        print("No data fetched.")
 
 if __name__ == "__main__":
     main()
